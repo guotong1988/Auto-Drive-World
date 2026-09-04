@@ -154,8 +154,6 @@ https://space.bilibili.com/447278957/lists
 绕开行人/到旗子有正奖励；压草只扣分不结束，撞人仍结束 rollout
 
 无窗口离屏渲染
-
-无窗口离屏渲染
 ```
 ~/.pyenv/versions/3.11.13/bin/python3 -m drive_agent.train_pilot_rl \
   --map all \
