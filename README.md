@@ -170,7 +170,7 @@ https://space.bilibili.com/447278957/lists
   --checkpoint checkpoints/pilot_rl.pt
 ```
 
-### 并行采集
+### 并行采集和RL训练
 多进程仿真 + 主进程批量推理，提高 GPU 利用率（--window 时不能并行）
 
 每个环境采 --rollout-steps 步，一次更新样本量 = num_envs × rollout_steps；总步数仍按环境交互累计
@@ -184,7 +184,8 @@ https://space.bilibili.com/447278957/lists
   --checkpoint checkpoints/pilot_rl.pt
 ```
 
-开窗口看训练过程（同一套 PPO；窗口是跟随相机给人看，策略仍吃前视；比离屏慢）
+### 开窗口看训练过程
+（同一套 PPO；窗口是跟随相机给人看，策略仍吃前视；比离屏慢）
 
 行人在小地图上是橙色点（出生点 28m 内不刷，3D 里一开始常常看不到人）
 ```
