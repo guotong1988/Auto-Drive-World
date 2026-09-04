@@ -151,7 +151,7 @@ https://space.bilibili.com/447278957/lists
   --map all --checkpoint checkpoints/pilotnet.pt --like-main --episodes 3
 ```
 
-## PPO 微调 PilotNet：
+## PPO 微调 PilotNet
 (画面, 导航指令, 速度) → (转向, 油门)
 
 导航指令仍是规则的 straight/left/right；行人只出现在画面里，不另做特征向量
