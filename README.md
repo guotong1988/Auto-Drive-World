@@ -77,7 +77,8 @@ https://space.bilibili.com/447278957/lists
 ~/.pyenv/versions/3.11.13/bin/python3 -m drive_agent.collect --episodes 3 --map zigzag
 ```
 
-无窗口采集（离屏车头前视，不弹 3D 窗口；标签/扰动/落盘与上面相同，可叠加 --no-disturb / --dodge）
+### 无窗口采集
+（离屏车头前视，不弹 3D 窗口；标签/扰动/落盘与上面相同，可叠加 --no-disturb / --dodge）
 
 策略观测是挡风玻璃高度前视，不是跟随相机；旧跟随相机 npz 不能接着训，请重新采集
 ```
@@ -107,13 +108,17 @@ https://space.bilibili.com/447278957/lists
   --checkpoint checkpoints/pilotnet.pt
 ```
 
-## 加载模型后按 T 开启自动驾驶（导航指令仍由规则规划器提供，转向和油门由模型预测）
+## 加载模型
+之后按 T 开启自动驾驶（导航指令仍由规则规划器提供，转向和油门由模型预测）
+
 油门由模型直接执行，不再因前方行人强制降速；泛化评测请换测试地图
 ```
 ~/.pyenv/versions/3.11.13/bin/python3 main.py --checkpoint checkpoints/pilotnet.pt --map crossroads
 ```
 
-## 闭环评测（与 PPO 同一套环境：随机路线、行人、撞人终止；压草只扣分不结束；确定性、不加探索噪声）
+## 闭环评测
+（与 PPO 同一套环境：随机路线、行人、撞人终止；压草只扣分不结束；确定性、不加探索噪声）
+
 先看 BC 基线能不能到终点；--steer expert 是规则转向+油门对照；--no-peds 只测跟路
 ```
 ~/.pyenv/versions/3.11.13/bin/python3 -m drive_agent.eval_pilot \
@@ -163,7 +168,8 @@ https://space.bilibili.com/447278957/lists
   --checkpoint checkpoints/pilot_rl.pt
 ```
 
-并行采集：多进程仿真 + 主进程批量推理，提高 GPU 利用率（--window 时不能并行）
+### 并行采集
+多进程仿真 + 主进程批量推理，提高 GPU 利用率（--window 时不能并行）
 
 每个环境采 --rollout-steps 步，一次更新样本量 = num_envs × rollout_steps；总步数仍按环境交互累计
 ```
@@ -189,7 +195,8 @@ https://space.bilibili.com/447278957/lists
   --window
 ```
 
-## Pilot-RL 自动驾驶（按 T；转向和油门由微调网络，导航指令仍是规则）
+## Pilot-RL 自动驾驶
+（按 T；转向和油门由微调网络，导航指令仍是规则）
 ```
 ~/.pyenv/versions/3.11.13/bin/python3 main.py \
   --checkpoint checkpoints/pilot_rl_best.pt \
