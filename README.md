@@ -151,7 +151,9 @@ https://space.bilibili.com/447278957/lists
   --map all --checkpoint checkpoints/pilotnet.pt --like-main --episodes 3
 ```
 
-## 整网 PPO 微调 PilotNet：(画面, 导航指令, 速度) → (steer, throttle)
+## PPO 微调 PilotNet：
+(画面, 导航指令, 速度) → (转向, 油门)
+
 导航指令仍是规则的 straight/left/right；行人只出现在画面里，不另做特征向量
 
 空路钉完整冻结 BC；靠近行人只对转向从高斯采样（油门用均值，避免刹停），策略梯度可进 CNN/主干
