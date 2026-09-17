@@ -11,10 +11,7 @@ from drive_agent.commands import COMMAND_NAMES, COMMAND_TO_ID
 from drive_agent.config import PilotNetConfig
 from drive_agent.model import PilotNet, is_late_fusion_state_dict, load_pilotnet_weights
 from drive_agent.pilot_rl_model import PilotActorCritic, load_pilot_rl
-from drive_agent.ped_safety import (
-  residual_gate_from_ped,
-  threat_pedestrian,
-)
+from drive_agent.ped_safety import residual_gate_in_corridor
 from drive_agent.rule_expert import RuleExpert
 from drive_env.maps import MapSpec
 
@@ -44,6 +41,8 @@ class SteeringController:
     self.pilot_rl: PilotActorCritic | None = None
     self._log_stride = 10
     self._log_counter = 0
+    # 钉 BC 的迟滞状态（默认空路钉 BC）；见 _pin_bc_gate。
+    self._pin_bc = True
     self._load_checkpoint(checkpoint)
 
   @property
@@ -118,12 +117,34 @@ class SteeringController:
   ) -> float:
     peds = pedestrians or []
     cfg = self._yield_cfg()
-    ped = threat_pedestrian(x, y, heading_deg, peds, cfg)
+    path = self.expert.reference_path
+    station, cte = path.project(x, y)
     return float(
-      residual_gate_from_ped(
-        x, y, heading_deg, ped, cfg, speed_kmh=speed_kmh
+      residual_gate_in_corridor(
+        x,
+        y,
+        heading_deg,
+        peds,
+        cfg,
+        speed_kmh=speed_kmh,
+        path=path,
+        station=station,
+        vehicle_cte=cte,
       )
     )
+
+  def _pin_bc_gate(self, gate_now: float) -> float:
+    """钉 BC 的迟滞：gate 升过 on 才放开策略，降下 off 才钉回。
+
+    返回喂给 ``act(pin_bc_gate=...)`` 的合成门控（0.0 = 钉 BC，1.0 = 用策略），
+    与 PPO 采集侧的迟滞口径一致；日志仍记真实 gate。
+    """
+    cfg = self._yield_cfg()
+    if gate_now >= float(getattr(cfg, "explore_gate_on", 0.22)):
+      self._pin_bc = False
+    elif gate_now < float(getattr(cfg, "explore_gate_off", 0.06)):
+      self._pin_bc = True
+    return 0.0 if self._pin_bc else 1.0
 
   @torch.no_grad()
   def predict_from_image(
@@ -215,7 +236,7 @@ class SteeringController:
         image_chw,
         self.expert.command_id,
         speed_kmh=speed,
-        gate=float(gate_now),
+        gate=self._pin_bc_gate(float(gate_now)),
       )
       self._log_control("pilot-rl", steer, throttle, gate_now)
       return throttle, steer

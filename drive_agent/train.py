@@ -114,6 +114,15 @@ def main() -> None:
   train_ds = DrivingDataset(data_dir, train_eps)
   val_ds = DrivingDataset(data_dir, val_eps)
   print(f"train samples: {len(train_ds)}, val samples: {len(val_ds)}")
+  if len(train_ds) > 0:
+    sample = train_ds[0]["image"]
+    h, w = int(sample.shape[-2]), int(sample.shape[-1])
+    if (h, w) != (config.image_height, config.image_width):
+      raise ValueError(
+        f"dataset frames are {h}x{w}, but PilotNet expects "
+        f"{config.image_height}x{config.image_width}. "
+        "Re-collect with drive_agent.collect after the resolution change."
+      )
 
   train_loader = DataLoader(
     train_ds,
@@ -133,7 +142,7 @@ def main() -> None:
   model = PilotNet(config).to(device)
   print(
     f"arch: branched ({config.num_commands} command heads, "
-    f"shared CNN + speed)"
+    f"shared CNN + speed, {config.image_height}x{config.image_width})"
   )
   optimizer = torch.optim.AdamW(
     model.parameters(),

@@ -314,7 +314,7 @@ def _run_windowed(args: argparse.Namespace) -> None:
   from direct.task import Task
   from panda3d.core import WindowProperties
 
-  from drive_agent.capture import EgoCapture
+  from drive_agent.capture import make_policy_ego_capture
   from drive_env.camera import ChaseCamera
 
   class DataCollector(ShowBase, _CollectSession):
@@ -336,7 +336,7 @@ def _run_windowed(args: argparse.Namespace) -> None:
       self.vehicle = _make_vehicle(self.render, self.physics, self.world)
       self.chase_cam = ChaseCamera(self.camera, self.vehicle.node)
       self._init_session(collector_args)
-      self.capture = EgoCapture(
+      self.capture = make_policy_ego_capture(
         self.pilot_config.image_width,
         self.pilot_config.image_height,
       )
@@ -430,7 +430,7 @@ class HeadlessDataCollector(_CollectSession):
   """无窗口采集：``window-type none`` + 离屏车头前视，与开窗口落盘同一套镜头。"""
 
   def __init__(self, args: argparse.Namespace):
-    from drive_agent.capture import EgoCapture
+    from drive_agent.capture import make_policy_ego_capture
 
     enable_headless_prc()
     self.map_spec = get_map(args.map)
@@ -441,7 +441,7 @@ class HeadlessDataCollector(_CollectSession):
     print(f"map: {self.map_spec.id} ({self.map_spec.name}) [headless]")
     self.vehicle = _make_vehicle(self._render, self.physics, self.world)
     self._init_session(args)
-    self.capture = EgoCapture(
+    self.capture = make_policy_ego_capture(
       self.pilot_config.image_width,
       self.pilot_config.image_height,
     )

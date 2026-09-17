@@ -10,6 +10,19 @@ from drive_env.maps import TRACK_HALF_WIDTH, MapSpec
 _HALF_LENGTH = 1.75
 _HALF_WIDTH = 0.88
 
+# hit_vehicle：车半径 1.6 m + 行人 1.35 m = 2.95 m。绕行目标必须大于这个圆。
+_HIT_CAR_M = 1.6
+_HIT_PED_M = 1.35
+HIT_NEED_M = _HIT_CAR_M + _HIT_PED_M
+_PASS_LAT_M = 4.0
+_DODGE_BEHIND_M = -2.0
+_GATE_ON = 0.15
+_HOLD_FRAMES = 48
+# 车体右侧速度超过此值视为横穿，绕行侧改走其行进方向后方。
+_CROSS_V_RIGHT = 0.35
+# 贴身危险圈余量：行人进撞人半径 + 此余量时门控无视前后直接全开。
+_GATE_CLOSE_MARGIN_M = 0.5
+
 
 def _body_axes(heading_deg: float) -> tuple[float, float, float, float]:
   h = math.radians(heading_deg)
@@ -90,8 +103,8 @@ def ped_body_frame(
 ) -> tuple[float, float, float]:
   """返回行人在车体坐标系中的 (距离, 前方, 右侧)。"""
   if ped_xy is None:
-    # fwd 必须 < 0.5，否则 residual_gate_from_ped 会把「没人」当成前方 1m。
-    return 1e9, -1.0, 0.0
+    # fwd 必须 < _DODGE_BEHIND_M，否则门控会把「没人」当成贴身行人全开。
+    return 1e9, -1e9, 0.0
   fx, fy, rx, ry = _body_axes(heading_deg)
   dx, dy = ped_xy[0] - x, ped_xy[1] - y
   return math.hypot(dx, dy), dx * fx + dy * fy, dx * rx + dy * ry
@@ -104,49 +117,25 @@ def threat_pedestrian(
   positions: list[tuple[float, float]],
   config: object | None = None,
 ) -> tuple[float, float] | None:
-  """行驶走廊内最近的前方行人（忽略路边 / 身后）。"""
+  """行驶走廊内最紧迫的行人（含车侧 / 贴身；忽略路边与已远离的身后）。"""
   lane = float(getattr(config, "residual_lane_m", 5.0))
+  close = HIT_NEED_M + _GATE_CLOSE_MARGIN_M
   best: tuple[float, float] | None = None
   best_key = float("inf")
   for px, py in positions:
     dist, fwd, right = ped_body_frame(x, y, heading_deg, (px, py))
-    if fwd < 0.5 or abs(right) > lane:
+    if dist < close:
+      # 贴身危险圈最优先：此时 fwd 已不能反映紧迫度。
+      key = -dist
+    elif fwd < _DODGE_BEHIND_M or abs(right) > lane:
       continue
-    key = dist + 0.25 * abs(right)
+    else:
+      # 用沿轨迹距离，与 TTC 及 RuleDodge 的 min(ahead) 口径一致。
+      key = fwd
     if key < best_key:
       best_key = key
       best = (px, py)
   return best
-
-
-def residual_gate_from_ped(
-  x: float,
-  y: float,
-  heading_deg: float,
-  ped_xy: tuple[float, float] | None,
-  config: object | None = None,
-  speed_kmh: float | None = None,
-) -> float:
-  if ped_xy is None:
-    return 0.0
-  _dist, fwd, right = ped_body_frame(x, y, heading_deg, ped_xy)
-  lane = float(getattr(config, "residual_lane_m", 5.0))
-  if fwd < 0.5 or abs(right) > lane:
-    return 0.0
-  # 用沿轨迹距离，与 TTC 一致；巡航时门控比欧氏 16–32 m 更早打开。
-  return residual_gate(fwd, config, speed_kmh=speed_kmh)
-
-
-# hit_vehicle：车半径 1.6 m + 行人 1.35 m = 2.95 m。绕行目标必须大于这个圆。
-_HIT_CAR_M = 1.6
-_HIT_PED_M = 1.35
-HIT_NEED_M = _HIT_CAR_M + _HIT_PED_M
-_PASS_LAT_M = 4.0
-_DODGE_BEHIND_M = -2.0
-_GATE_ON = 0.15
-_HOLD_FRAMES = 48
-# 车体右侧速度超过此值视为横穿，绕行侧改走其行进方向后方。
-_CROSS_V_RIGHT = 0.35
 
 
 def _path_body_axes(path: object, station: float) -> tuple[float, float, float, float]:
@@ -206,6 +195,51 @@ def _corridor_peds(
   return found
 
 
+def residual_gate_in_corridor(
+  x: float,
+  y: float,
+  heading_deg: float,
+  positions: list[tuple[float, float]],
+  config: object | None = None,
+  speed_kmh: float | None = None,
+  *,
+  path: object | None = None,
+  station: float | None = None,
+  vehicle_cte: float = 0.0,
+) -> float:
+  """走廊门控：最紧迫行人决定开度（1 = 开探索，0 = 走廊清空）。
+
+  有参考路径时沿弧长找人（弯道也能看见拐角上的人），与 RuleDodge 同一
+  走廊口径；否则退化为车头朝向。贴身危险圈内无视前后直接全开；
+  车侧 / 刚过的行人（fwd≈0 到 _DODGE_BEHIND_M）保持全开，避免贴身瞬间
+  钉回跟路 BC 把车拉向行人。
+  """
+  if not positions:
+    return 0.0
+  close = HIT_NEED_M + _GATE_CLOSE_MARGIN_M
+  for px, py in positions:
+    if math.hypot(px - x, py - y) < close:
+      return 1.0
+  found = _corridor_peds(
+    x,
+    y,
+    heading_deg,
+    positions,
+    config,
+    0.0 if speed_kmh is None else float(speed_kmh),
+    behind_m=_DODGE_BEHIND_M,
+    path=path,
+    station=station,
+    vehicle_cte=vehicle_cte,
+  )
+  gate = 0.0
+  for fwd, _right, _dist, _xy, _vr in found:
+    gate = max(
+      gate, residual_gate(max(fwd, 0.0), config, speed_kmh=speed_kmh)
+    )
+  return gate
+
+
 class RuleDodge:
   """规则绕行（有状态）：锁过侧，避免贴身时跟路把车拉回人身上。"""
 
@@ -260,7 +294,8 @@ class RuleDodge:
 
     ahead = [fwd for fwd, _right, _dist, _xy, _vr in found if fwd > 0.0]
     gate = residual_gate(min(ahead), config, speed_kmh=speed_kmh) if ahead else 1.0
-    if gate < _GATE_ON and min(fwd for fwd, _r, _d, _xy, _vr in found) > 0.5:
+    gate_on = float(getattr(config, "rule_dodge_gate_on", _GATE_ON))
+    if gate < gate_on and min(fwd for fwd, _r, _d, _xy, _vr in found) > 0.5:
       self._tick_hold()
       self.last = {
         "fwd": float(min(ahead) if ahead else 0.0),

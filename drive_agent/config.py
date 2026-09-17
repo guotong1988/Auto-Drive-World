@@ -6,11 +6,15 @@ from dataclasses import dataclass
 
 from drive_agent.commands import NUM_COMMANDS
 
+# 策略输入分辨率 (H, W)。采集 / BC / PPO / eval / main 自动驾驶共用。
+POLICY_IMAGE_HEIGHT = 120
+POLICY_IMAGE_WIDTH = 160
+
 
 @dataclass
 class PilotNetConfig:
-  image_height: int = 60
-  image_width: int = 80
+  image_height: int = POLICY_IMAGE_HEIGHT
+  image_width: int = POLICY_IMAGE_WIDTH
   num_commands: int = NUM_COMMANDS
   # (steer, throttle)；自动驾驶约 42 km/h 巡航，速度特征按此尺度归一。
   action_dim: int = 2
@@ -34,8 +38,8 @@ class PilotRLConfig:
 
   num_commands: int = NUM_COMMANDS
   action_dim: int = 2
-  image_height: int = 60
-  image_width: int = 80
+  image_height: int = POLICY_IMAGE_HEIGHT
+  image_width: int = POLICY_IMAGE_WIDTH
   speed_scale_kmh: float = 45.0
 
   lr: float = 1e-4
@@ -48,6 +52,9 @@ class PilotRLConfig:
   # 空旷路面钉在 BC 上（与 main.py --checkpoint 闭环一致）。
   # 靠近行人时 KL 权重下降（见 bc_kl_dodge_weight）。
   bc_kl_coef: float = 0.08
+  # 随训练进度线性退火到该值：前期锚定防躲人更新带偏跟路，后期放开
+  # 释放上限（anchor 同时惩罚 μ 与 σ，全程固定会压住末段精细优化）。
+  bc_kl_coef_end: float = 0.0
   bc_kl_steer_weight: float = 1.0
   bc_kl_dodge_weight: float = 0.0
   # 空路和走廊都把油门拉回 BC 巡航；躲人靠转向，不靠刹停让行。
@@ -60,40 +67,20 @@ class PilotRLConfig:
   ent_coef_end: float = 0.0004
   log_std_init_steer: float = -1.5
   log_std_init_throttle: float = -1.6
-  # 行人特征不再进策略。下列字段只为旧 checkpoint 反序列化保留。
-  ped_feat_dim: int = 3
-  ped_reinit_std: float = 0.0
-  ped_reinit_stale_steps: int = 0
   # 空旷路面钉在冻结 BC（与 main.py --checkpoint 闭环一致）。
   # 走廊有人时只对转向从 N(μ,σ) 采样；油门用均值，避免采到刹车学成让行。
   explore_gate_min: float = 0.2
-  # 门控迟滞（旧外加噪声用）；现已改为策略分布采样。
+  # 钉 BC 的迟滞：gate 升过 on 才放开采样，降下 off 才钉回，
+  # 避免 gate 在阈值附近抖动时动作分布在 BC 与采样之间来回跳。
   explore_gate_on: float = 0.22
   explore_gate_off: float = 0.06
   policy_gate_min: float = 0.2
+  # 策略损失门控的软边宽度：样本权重在 gate_min ± soft 之间从 0 线性升到 1。
+  policy_gate_soft: float = 0.1
   # 停车时打方向几乎不改变轨迹，低速步不进策略损失。
   policy_min_speed_kmh: float = 6.0
   # False = 采集时油门取 μ，不采样；PPO 也不用油门 log π（躲人靠转向）。
   explore_throttle: bool = False
-  # 旧外加探索噪声字段，只为 checkpoint 反序列化保留，不再参与动作。
-  explore_rho_dodge: float = 0.95
-  explore_rho_clear: float = 0.0
-  explore_rho_throttle: float = 0.2
-  explore_std_boost: float = 0.0
-  explore_std_boost_throttle: float = 0.0
-  explore_steer_ref_kmh: float = 16.0
-  explore_steer_speed_pow: float = 1.0
-  explore_steer_speed_floor: float = 0.28
-  explore_z_clip_steer: float = 1.2
-  explore_adapt: bool = False
-  explore_adapt_window: int = 8
-  explore_adapt_trigger: float = 0.35
-  explore_std_boost_min: float = 0.45
-  explore_std_boost_max: float = 1.35
-  explore_rho_dodge_min: float = 0.92
-  explore_rho_dodge_max: float = 0.97
-  explore_adapt_down: float = 0.25
-  explore_adapt_up: float = 0.08
   # 空路钉在冻结 BC 最后一层上，避免躲人更新把 90° 弯的跟路带偏。
   pin_bc_empty: bool = True
   target_kl: float = 0.02
@@ -106,14 +93,20 @@ class PilotRLConfig:
   # 1 = 训练进程内单环境（可 --window）；>1 时多进程并行采集，主进程批量推理。
   num_envs: int = 1
   # success 与 return 都连续 patience 次更新没有新高才停；只看 success 会在还在涨 return 时砍掉。
-  # 30 ≈ 6 万步，滚动 20 局里曲线一抖就会提前砍掉后半段；60 ≈ 12 万步，仍能在 20 万步预算内停。
+  # patience 按更新次数算：60 次 × rollout_steps × action_repeat ≈ 18 万环境步
+  # （--total-steps 也是环境步）。滚动 20 局里曲线一抖就会提前砍掉后半段，别再调小。
   early_stop_patience: int = 60
   early_stop_slack: float = 0.0
   early_stop_return_slack: float = 1.0
   # 必须大于 |reward_goal| / |reward_collision|，否则终止奖励会被裁掉。
   reward_clip: float = 200.0
   value_clip: float = 0.0
-  action_repeat: int = 1
+  # 一个动作保持几个物理 tick。dt=1/30 且 repeat=1 时一局有 2700 个决策步，
+  # gamma=0.996 的视野只有 250 步（8 秒 / 约 100 m），到旗子的 +150 折回起点
+  # 只剩 0.003，等于目标里没有「到终点」。repeat=3 是 10 Hz 决策、一局 900 步，
+  # 视野约 25 秒（约 300 m），goal 折扣升到 0.027。
+  # BC 是 30 Hz 数据训的，repeat 越大 pin 的空路动作越粗；闭环开始左右摆就降回 2。
+  action_repeat: int = 3
 
   dt: float = 1.0 / 30.0
   max_episode_seconds: float = 90.0
@@ -123,6 +116,8 @@ class PilotRLConfig:
   seed: int = 42
 
   residual_lane_m: float = 5.0
+  # 规则绕行（RuleDodge）的激活门控：低于此值且最近行人还在前方时跟中线。
+  rule_dodge_gate_on: float = 0.15
   # 门控距离下限（低速）；巡航按 TTC 拉远，避免 45 km/h 时 16–32 m 才开探索。
   residual_gate_near: float = 16.0
   residual_gate_far: float = 32.0
@@ -132,8 +127,10 @@ class PilotRLConfig:
 
   # 成功奖励必须压过约 2 秒冲出路面自杀（旧 goal=+20 会被稠密代价淹没）。
   reward_goal: float = 150.0
-  # 顺利切到下一导航路点（小地图黄点）；低于终点，避免盖过旗帜。
-  reward_waypoint: float = 40.0
+  # 顺利切到下一导航路点（小地图黄点）。整条路线的路点总和要明显低于 reward_goal，
+  # 否则近处不打折的路点比远处打完折的旗子更划算，最优解变成一路刷黄点。
+  # 路线上通常 3–6 个黄点，12 → 总和 36–72，仍远低于 150。
+  reward_waypoint: float = 12.0
   reward_collision: float = -150.0
   reward_timeout: float = -20.0
   reward_offroad_done: float = -40.0

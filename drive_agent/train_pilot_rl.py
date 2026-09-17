@@ -94,6 +94,14 @@ def main() -> None:
     device = torch.device(args.device)
 
   map_ids = resolve_maps(args.map)
+  path = Path(args.pilot_checkpoint)
+  if not path.is_file():
+    raise FileNotFoundError(f"PilotNet checkpoint not found: {path}")
+  bc_ckpt = torch.load(path, map_location="cpu", weights_only=False)
+  bc_conf = bc_ckpt.get("config") or {}
+  if "image_height" in bc_conf and "image_width" in bc_conf:
+    cfg.image_height = int(bc_conf["image_height"])
+    cfg.image_width = int(bc_conf["image_width"])
   env = make_pilot_envs(
     map_ids=map_ids,
     config=cfg,
@@ -103,9 +111,6 @@ def main() -> None:
   )
   cfg.num_envs = env.num_envs
   model = PilotActorCritic(cfg)
-  path = Path(args.pilot_checkpoint)
-  if not path.is_file():
-    raise FileNotFoundError(f"PilotNet checkpoint not found: {path}")
   model.load_pilotnet_checkpoint(path, device=device)
   trainer = PilotPPOTrainer(env, model, cfg, device=device)
 
@@ -115,11 +120,15 @@ def main() -> None:
     f"num_envs={env.num_envs} | "
     f"init={args.pilot_checkpoint} | action=steer+throttle | "
     f"freeze_cnn={cfg.freeze_features} trunk_lr={cfg.trunk_lr_mult} "
-    f"feat_lr={cfg.features_lr_mult} bc_kl={cfg.bc_kl_coef} "
+    f"feat_lr={cfg.features_lr_mult} "
+    f"bc_kl={cfg.bc_kl_coef}→{getattr(cfg, 'bc_kl_coef_end', cfg.bc_kl_coef)} "
     f"explore_gate={cfg.explore_gate_min} "
+    f"pin_hyst={cfg.explore_gate_on}/{cfg.explore_gate_off} "
+    f"policy_gate={cfg.policy_gate_min}±{cfg.policy_gate_soft} "
     f"lead={cfg.residual_gate_near}/{cfg.residual_gate_far}m "
     f"ttc={cfg.residual_gate_ttc_near}/{cfg.residual_gate_ttc_far}s "
     f"sample=N(mu,std) pin_bc={cfg.pin_bc_empty} | "
+    f"repeat={cfg.action_repeat}({1.0 / (cfg.dt * cfg.action_repeat):.1f}Hz) "
     f"total_steps={cfg.total_steps} rollout={cfg.rollout_steps}"
     f"x{env.num_envs}={cfg.rollout_steps * env.num_envs} "
     f"term=hit/{'offroad/' if cfg.terminate_on_offroad else ''}timeout"
@@ -141,7 +150,9 @@ def main() -> None:
       trainer.set_progress(steps)
       batch = trainer.collect_rollout()
       metrics = trainer.update(batch)
-      steps += cfg.rollout_steps * env.num_envs
+      # 一个决策步走 action_repeat 个物理 tick；按 tick 累计，--total-steps 才是
+      # 固定的仿真预算（否则调大 action_repeat 会让墙钟时间成倍变长）。
+      steps += cfg.rollout_steps * env.num_envs * max(1, int(cfg.action_repeat))
       update_i += 1
       stats = trainer.stats()
       row = {"step": steps, **metrics, **stats}

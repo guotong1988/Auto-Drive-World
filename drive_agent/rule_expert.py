@@ -382,6 +382,11 @@ class RuleExpert:
       return self.nodes[self._after_node]
     return self.nodes[self._target_node]
 
+  @property
+  def reference_path(self) -> _RefPath:
+    """当前参考路径（纯追踪与走廊门控共用；必要时重建）。"""
+    return self._reference_path()
+
   def path_station(self, x: float, y: float) -> tuple[float, float, object]:
     """投影到当前参考路径：(弧长 m, 横向误差 m, path_key)。"""
     path = self._reference_path()

@@ -89,10 +89,14 @@ def _pilot_env_worker(conn: Connection, kwargs: dict[str, Any]) -> None:
         obs, reward, done, info = env.step(msg[1])
         if done:
           obs = env.reset()
+          gate = env.dodge_gate()
+        else:
+          # 复用 step 最后一拍算好的门控（同一状态），不再重复搜走廊。
+          gate = float(info.get("dodge_gate", 0.0))
         conn.send(
           (
             "ok",
-            _pack_obs(obs, env.dodge_gate()),
+            _pack_obs(obs, gate),
             float(reward),
             bool(done),
             _py_info(info),
@@ -212,7 +216,11 @@ class VecDrivePilotEnv:
       obs, reward, done, info = self._local.step(actions[0])
       if done:
         obs = self._local.reset()
-      next_obs = _stack_packs([_pack_obs(obs, self._local.dodge_gate())])
+        gate = self._local.dodge_gate()
+      else:
+        # 复用 step 最后一拍算好的门控（同一状态），不再重复搜走廊。
+        gate = float(info.get("dodge_gate", 0.0))
+      next_obs = _stack_packs([_pack_obs(obs, gate)])
       return (
         next_obs,
         np.asarray([reward], dtype=np.float32),

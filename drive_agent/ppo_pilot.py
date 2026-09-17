@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import torch
@@ -80,6 +81,10 @@ class PilotRolloutBatch:
   returns: torch.Tensor
   gates: torch.Tensor
   speeds: torch.Tensor
+  # 采集时该步是否钉在冻结 BC 上（log_prob=0）。钉住的样本 ratio 不是合法
+  # 重要性比，策略损失必须靠它把这类样本权重清零——仅靠 gate 阈值区分不了
+  # 迟滞带内「放开采样」与「仍在钉」的样本。
+  pinned: torch.Tensor
 
 
 class PilotPPOTrainer:
@@ -99,7 +104,11 @@ class PilotPPOTrainer:
     self._apply_freeze()
     self.optimizer = torch.optim.Adam(self._param_groups())
     self.bc_ref: PilotActorCritic | None = None
-    if float(self.config.bc_kl_coef) > 0.0:
+    bc_kl_max = max(
+      float(self.config.bc_kl_coef),
+      float(getattr(self.config, "bc_kl_coef_end", 0.0)),
+    )
+    if bc_kl_max > 0.0:
       self.bc_ref = copy.deepcopy(self.model).to(self.device)
       self.bc_ref.eval()
       for p in self.bc_ref.parameters():
@@ -108,6 +117,9 @@ class PilotPPOTrainer:
     self.ep_return = np.zeros(self.num_envs, dtype=np.float64)
     self.ep_len = np.zeros(self.num_envs, dtype=np.int32)
     self.ep_max_off = np.zeros(self.num_envs, dtype=np.float64)
+    # 钉 BC 的迟滞状态（默认空路钉 BC）：gate 升过 explore_gate_on 才放开
+    # 采样，降下 explore_gate_off 才钉回，避免阈值附近来回跳。
+    self._pin_bc = np.ones(self.num_envs, dtype=np.bool_)
     self.recent_returns: list[float] = []
     self.recent_success: list[float] = []
     self.recent_hits: list[float] = []
@@ -120,6 +132,7 @@ class PilotPPOTrainer:
     self.recent_throttles: list[float] = []
     self.recent_early: list[float] = []
     self._ent_coef = float(self.config.ent_coef)
+    self._bc_kl_coef = float(self.config.bc_kl_coef)
 
   def _apply_freeze(self) -> None:
     self.model._freeze_bc_encoder()
@@ -180,6 +193,29 @@ class PilotPPOTrainer:
     for group in self.optimizer.param_groups:
       group["lr"] = float(group["base_lr"]) * scale
     self._ent_coef = cfg.ent_coef + (cfg.ent_coef_end - cfg.ent_coef) * t
+    bc_kl_end = float(getattr(cfg, "bc_kl_coef_end", cfg.bc_kl_coef))
+    self._bc_kl_coef = float(cfg.bc_kl_coef) + (bc_kl_end - float(cfg.bc_kl_coef)) * t
+
+  def _policy_mask(self, gates: Any, speeds: Any, pinned: Any) -> Any:
+    """进策略损失的样本权重 [0, 1]；``None`` = 不过滤。numpy 与 torch 通用。
+
+    软门控：权重在 policy_gate_min ± policy_gate_soft 之间从 0 线性升到 1，
+    避免 gate 在阈值附近抖动时相似样本时而进损失时而不进。钉 BC 的样本
+    （log_prob=0）权重恒为 0。advantage 归一化和 ``update`` 的加权必须用
+    同一个权重，否则归一化的统计量来自一批不参与损失的样本。
+    """
+    cfg = self.config
+    gate_min = float(cfg.policy_gate_min)
+    if gate_min <= 0.0:
+      return None
+    speed_min = float(getattr(cfg, "policy_min_speed_kmh", 6.0))
+    soft = max(float(getattr(cfg, "policy_gate_soft", 0.1)), 1e-6)
+    w = (gates - (gate_min - soft)) / (2.0 * soft)
+    if isinstance(w, np.ndarray):
+      w = np.clip(w, 0.0, 1.0)
+    else:
+      w = w.clamp(0.0, 1.0)
+    return w * (speeds >= speed_min) * (1.0 - pinned)
 
   def _record_episode(self, env_i: int, info: dict) -> None:
     cfg = self.config
@@ -231,6 +267,7 @@ class PilotPPOTrainer:
     val_buf = np.zeros((t_len, n_envs), dtype=np.float32)
     gate_buf = np.zeros((t_len, n_envs), dtype=np.float32)
     spd_buf = np.zeros((t_len, n_envs), dtype=np.float32)
+    pin_buf = np.zeros((t_len, n_envs), dtype=np.float32)
     clip = float(cfg.reward_clip)
 
     obs = self._obs
@@ -242,8 +279,18 @@ class PilotPPOTrainer:
       pin_bc = bool(getattr(cfg, "pin_bc_empty", True))
       pin_gate: torch.Tensor | None = None
       if pin_bc:
+        # 迟滞更新钉 BC 状态，再喂合成门控（0=钉，1=放开）给 act。
+        self._pin_bc = np.where(
+          obs.gates >= float(cfg.explore_gate_on),
+          False,
+          np.where(
+            obs.gates < float(cfg.explore_gate_off), True, self._pin_bc
+          ),
+        )
         pin_gate = torch.as_tensor(
-          obs.gates, dtype=torch.float32, device=self.device
+          np.where(self._pin_bc, 0.0, 1.0),
+          dtype=torch.float32,
+          device=self.device,
         )
       # 训练：从 N(μ,σ) 采样；空路可钉冻结 BC。评测仍走确定性 μ。
       with torch.no_grad():
@@ -269,6 +316,8 @@ class PilotPPOTrainer:
       val_buf[t] = value.detach().cpu().numpy()
       gate_buf[t] = obs.gates
       spd_buf[t] = obs.speeds
+      # pin_bc_empty=False 时不存在钉 BC 样本，全记 0（迟滞状态未启用）。
+      pin_buf[t] = self._pin_bc.astype(np.float32) if pin_bc else 0.0
 
       self.ep_return += rewards.astype(np.float64)
       self.ep_len += 1
@@ -278,6 +327,8 @@ class PilotPPOTrainer:
         )
         if bool(dones[i]):
           self._record_episode(i, infos[i])
+          # 新回合从「空路钉 BC」重新起迟滞。
+          self._pin_bc[i] = True
       obs = next_obs
 
     self._obs = obs
@@ -292,7 +343,19 @@ class PilotPPOTrainer:
     )
     flat = t_len * n_envs
     adv = advantages.reshape(flat)
-    adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+    # 只有 update() 里 w>0 的样本进策略损失（门控开、没钉 BC 且不是低速）。
+    # 若按全体样本归一化，这个子集的均值不为 0，偏移会不分好坏地整体抬高
+    # 或压低躲人动作；归一化与 update 必须用同一组软权重。
+    mask = self._policy_mask(
+      gate_buf.reshape(flat), spd_buf.reshape(flat), pin_buf.reshape(flat)
+    )
+    if mask is not None and float(mask.sum()) >= 2:
+      w_sum = float(mask.sum())
+      mean = float((adv * mask).sum()) / w_sum
+      var = float((mask * (adv - mean) ** 2).sum()) / w_sum
+      adv = (adv - mean) / (float(np.sqrt(var)) + 1e-8)
+    else:
+      adv = (adv - adv.mean()) / (adv.std() + 1e-8)
 
     return PilotRolloutBatch(
       images=torch.as_tensor(img_buf.reshape(flat, 3, h, w), device=self.device),
@@ -308,6 +371,7 @@ class PilotPPOTrainer:
       returns=torch.as_tensor(returns.reshape(flat), device=self.device),
       gates=torch.as_tensor(gate_buf.reshape(flat), device=self.device),
       speeds=torch.as_tensor(spd_buf.reshape(flat), device=self.device),
+      pinned=torch.as_tensor(pin_buf.reshape(flat), device=self.device),
     )
 
   def update(self, batch: PilotRolloutBatch) -> dict[str, float]:
@@ -322,6 +386,7 @@ class PilotPPOTrainer:
       "approx_kl": 0.0,
       "bc_kl": 0.0,
       "ent_coef": float(self._ent_coef),
+      "bc_kl_coef": float(self._bc_kl_coef),
       "lr": float(self.optimizer.param_groups[0]["lr"]),
       "abs_action": float(batch.actions.abs().mean().item()),
     }
@@ -342,6 +407,7 @@ class PilotPPOTrainer:
         ret = batch.returns[mb]
         gates = batch.gates[mb]
         speeds = batch.speeds[mb]
+        pinned = batch.pinned[mb]
 
         logp, entropy, value = self.model.evaluate(
           images,
@@ -354,10 +420,9 @@ class PilotPPOTrainer:
         surr1 = ratio * adv
         surr2 = torch.clamp(ratio, 1.0 - cfg.clip_eps, 1.0 + cfg.clip_eps) * adv
         min_surr = torch.min(surr1, surr2)
-        gate_min = float(cfg.policy_gate_min)
-        speed_min = float(getattr(cfg, "policy_min_speed_kmh", 6.0))
-        if gate_min > 0.0:
-          w = ((gates >= gate_min) & (speeds >= speed_min)).to(dtype=min_surr.dtype)
+        mb_mask = self._policy_mask(gates, speeds, pinned)
+        if mb_mask is not None:
+          w = mb_mask.to(dtype=min_surr.dtype)
           w_sum = w.sum()
           if float(w_sum.item()) >= 4.0:
             w_sum = w_sum.clamp_min(1.0)
@@ -385,7 +450,7 @@ class PilotPPOTrainer:
           value_loss = 0.5 * (value - ret).pow(2).mean()
 
         bc_kl = policy_loss.new_zeros(())
-        if self.bc_ref is not None and float(cfg.bc_kl_coef) > 0.0:
+        if self.bc_ref is not None and self._bc_kl_coef > 0.0:
           mu, std, _ = self.model.forward(images, commands, speeds)
           with torch.no_grad():
             mu_bc, std_bc, _ = self.bc_ref.forward(images, commands, speeds)
@@ -406,7 +471,7 @@ class PilotPPOTrainer:
           policy_loss
           + cfg.vf_coef * value_loss
           + self._ent_coef * entropy_loss
-          + float(cfg.bc_kl_coef) * bc_kl
+          + self._bc_kl_coef * bc_kl
         )
         self.optimizer.zero_grad(set_to_none=True)
         loss.backward()

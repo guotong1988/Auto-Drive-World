@@ -44,6 +44,8 @@ def load_act_fn(path: Path, device: torch.device):
   )
   if is_pilot_rl:
     model = load_pilot_rl(path, device=device)
+    # 钉 BC 的迟滞状态（与 PPO 采集 / controller 闭环同一口径）。
+    pin_state = {"pinned": True}
 
     def act(
       image: np.ndarray,
@@ -56,12 +58,19 @@ def load_act_fn(path: Path, device: torch.device):
       spd = torch.tensor([float(speed_kmh)], dtype=torch.float32, device=device)
       cfg = model.config
       pin = bool(getattr(cfg, "pin_bc_empty", True))
+      pin_gate: float | None = None
+      if pin and gate is not None:
+        if gate >= float(getattr(cfg, "explore_gate_on", 0.22)):
+          pin_state["pinned"] = False
+        elif gate < float(getattr(cfg, "explore_gate_off", 0.06)):
+          pin_state["pinned"] = True
+        pin_gate = 0.0 if pin_state["pinned"] else 1.0
       action, _, _ = model.act(
         img,
         cmd,
         spd,
         deterministic=True,
-        pin_bc_gate=gate if pin else None,
+        pin_bc_gate=pin_gate,
         pin_bc_min=float(getattr(cfg, "explore_gate_min", 0.2)),
       )
       vec = action.reshape(-1)
@@ -188,18 +197,25 @@ def run_eval(
     torch_device = torch.device(device)
 
   map_ids = resolve_maps(map_selection)
+  if steer == "model":
+    if not checkpoint:
+      raise ValueError("steer=model requires a checkpoint")
+    path = Path(checkpoint)
+    if not path.is_file():
+      raise FileNotFoundError(f"checkpoint not found: {path}")
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    conf = ckpt.get("config") or {}
+    if "image_height" in conf and "image_width" in conf:
+      cfg.image_height = int(conf["image_height"])
+      cfg.image_width = int(conf["image_width"])
+
   env = DrivePilotEnv(map_ids=map_ids, config=cfg, seed=cfg.seed)
 
   act_fn = None
   kind = "expert"
   if steer == "model":
-    if not checkpoint:
-      env.close()
-      raise ValueError("steer=model requires a checkpoint")
+    assert checkpoint is not None
     path = Path(checkpoint)
-    if not path.is_file():
-      env.close()
-      raise FileNotFoundError(f"checkpoint not found: {path}")
     act_fn, kind = load_act_fn(path, torch_device)
 
   term = "goal/timeout" if like_main else "goal/hit/timeout"

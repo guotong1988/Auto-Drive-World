@@ -224,7 +224,7 @@ class EgoCapture:
   """策略观测用的离屏车头前视抓取器（采集 / PPO / eval / main 自动驾驶）。
 
   先以采集分辨率渲染再下采样到 PilotNet 分辨率。
-  直接按 60×80 渲染会使路缘锯齿过重，BC 策略闭环成功率会塌掉。
+  直接按 120×160 渲染会使路缘锯齿过重，BC 策略闭环成功率会塌掉。
   3D 窗口可以另挂 ChaseCamera，但不要把窗口画面送给网络。
   """
 
@@ -295,3 +295,8 @@ class EgoCapture:
     if self.buffer is not None:
       self.engine.removeWindow(self.buffer)
       self.buffer = None
+
+
+def make_policy_ego_capture(image_width: int, image_height: int) -> EgoCapture:
+  """策略观测镜头：挡风玻璃高度前视 + 固定 FOV。采集 / PPO / eval / main 共用。"""
+  return EgoCapture(image_width, image_height, fov=EGO_FOV_DEG)

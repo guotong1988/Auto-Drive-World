@@ -111,7 +111,7 @@ class PilotNet(nn.Module):
     super().__init__()
     self.config = config or PilotNetConfig()
 
-    # padding 保证 60×80 输入仍有可用空间尺寸（经典 PilotNet
+    # padding 保证 120×160 输入仍有可用空间尺寸（经典 PilotNet
     # 按 66×200 等更大图设计，这里不加 padding 会塌掉）。
     self.features = nn.Sequential(
       nn.Conv2d(3, 24, kernel_size=5, stride=2, padding=2),
