@@ -8,14 +8,10 @@ from direct.showbase.ShowBase import ShowBase
 from direct.task import Task
 from panda3d.core import WindowProperties
 
-from drive_agent.capture import (
-  EgoCapture,
-  OffscreenCapture,
-  capture_rgb_chw,
-)
+from drive_agent.capture import make_policy_ego_capture
 from drive_agent.config import PilotNetConfig
 from drive_agent.controller import SteeringController
-from drive_env.camera import ChaseCamera
+from drive_env.camera import ChaseCamera, EGO_FOV_DEG
 from drive_env.maps import MapSpec, get_map
 from drive_env.minimap import MiniMap
 from drive_env.physics import PhysicsWorld
@@ -97,25 +93,15 @@ class RacingGame(ShowBase):
       self._collect_dir.mkdir(parents=True, exist_ok=True)
       self._episode_idx = self._next_episode_index()
 
-    # 模型必须吃 EgoCapture（与 collect / PPO / eval 相同：800×600、
-    # 车头前视 60° FOV）。窗口是跟随相机，不能把窗口画面送给网络。
-    self._model_capture: EgoCapture | None = None
-    self._offscreen = None
+    # 模型必须吃车头前视（与 collect / PPO / eval 相同：800×600 渲染、
+    # 挡风玻璃高度、60° FOV）。窗口是跟随相机，不能把窗口画面送给网络。
+    self._model_capture = None
     if self._collect or self._use_model:
-      try:
-        self._model_capture = EgoCapture(
-          self._collect_config.image_width,
-          self._collect_config.image_height,
-        )
-        self._model_capture.bind(self.render, self.vehicle.node)
-      except Exception as exc:  # noqa: BLE001 — 降级为窗口截图
-        print(f"ego capture unavailable ({exc}); falling back")
-        self._model_capture = None
-        self._offscreen = OffscreenCapture.create(
-          self,
-          self._collect_config.image_width,
-          self._collect_config.image_height,
-        )
+      self._model_capture = make_policy_ego_capture(
+        self._collect_config.image_width,
+        self._collect_config.image_height,
+      )
+      self._model_capture.bind(self.render, self.vehicle.node)
 
     self._keys = {
       "forward": False,
@@ -226,35 +212,16 @@ class RacingGame(ShowBase):
       **hud_kw,
     )
 
-  def _set_overlays_hidden(self, hidden: bool):
-    if hidden:
-      self.hud.hide()
-      self.minimap.root.hide()
-    else:
-      self.hud.show()
-      self.minimap.root.show()
-
   def _capture_frame(self, dt: float) -> np.ndarray | None:
     if self._frame_rgb is not None:
       return self._frame_rgb
-    if self._model_capture is not None:
-      # 与 collect 相同：独立车头前视 + 立刻渲染，不用窗口跟随镜头。
-      image = self._model_capture.read_rgb_chw(dt)
-      self._model_view_updated = True
-      self._frame_rgb = image
-      return image
-    if self._offscreen is not None:
-      image = self._offscreen.read_rgb_chw()
-      self._frame_rgb = image
-      return image
-
-    self._set_overlays_hidden(True)
-    image = capture_rgb_chw(
-      self,
-      self._collect_config.image_width,
-      self._collect_config.image_height,
-    )
-    self._set_overlays_hidden(False)
+    if self._model_capture is None:
+      raise RuntimeError(
+        "policy ego camera is not bound; cannot feed chase-camera frames to the model"
+      )
+    # 与 collect / PPO / eval 相同：独立车头前视 + 立刻渲染，不用窗口跟随镜头。
+    image = self._model_capture.read_rgb_chw(dt)
+    self._model_view_updated = True
     self._frame_rgb = image
     return image
 
@@ -314,6 +281,7 @@ class RacingGame(ShowBase):
       "labels": ["command", "speed", "steer", "throttle"],
       "commands": ["straight", "left", "right", "stop"],
       "camera": "ego",
+      "fov_deg": EGO_FOV_DEG,
       "note": "only successful goal-reaching episodes are kept; images are windshield ego camera",
     }
     with (self._collect_dir / "manifest.json").open("w") as f:

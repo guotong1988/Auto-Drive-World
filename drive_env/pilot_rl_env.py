@@ -17,12 +17,12 @@ from panda3d.core import NodePath, loadPrcFileData
 loadPrcFileData("", "audio-library-name null")
 loadPrcFileData("", "notify-level-audio error")
 
-from drive_agent.capture import EgoCapture, enable_headless_prc  # noqa: E402
+from drive_agent.capture import enable_headless_prc, make_policy_ego_capture  # noqa: E402
 from drive_agent.config import PilotNetConfig, PilotRLConfig  # noqa: E402
 from drive_agent.ped_safety import (  # noqa: E402
   off_road_distance,
   ped_body_frame,
-  residual_gate_from_ped,
+  residual_gate_in_corridor,
   threat_pedestrian,
 )
 from drive_agent.rule_expert import RuleExpert  # noqa: E402
@@ -91,7 +91,7 @@ class DrivePilotEnv:
     else:
       self._viewer = _make_viewer()
       self._setup_hud()
-    self.capture = EgoCapture(
+    self.capture = make_policy_ego_capture(
       self.pilot_cfg.image_width,
       self.pilot_cfg.image_height,
     )
@@ -192,22 +192,27 @@ class DrivePilotEnv:
     return float(self._rule_throttle)
 
   def dodge_gate(self) -> float:
-    """车道前方有行人时为 1，走廊清空时为 0。"""
-    if self.vehicle is None or self.pedestrians is None:
+    """车道前方有行人时为 1，走廊清空时为 0。弯道沿参考路径弧长看人。"""
+    if (
+      self.vehicle is None
+      or self.pedestrians is None
+      or self.expert is None
+    ):
       return 0.0
     pos = self.vehicle.node.getPos()
-    heading = self.vehicle.node.getH()
-    threat = threat_pedestrian(
-      pos.x, pos.y, heading, self.pedestrians.positions, self.config
-    )
+    path = self.expert.reference_path
+    station, cte = path.project(pos.x, pos.y)
     return float(
-      residual_gate_from_ped(
+      residual_gate_in_corridor(
         pos.x,
         pos.y,
-        heading,
-        threat,
+        self.vehicle.node.getH(),
+        self.pedestrians.positions,
         self.config,
         speed_kmh=self.vehicle.speed_kmh(),
+        path=path,
+        station=station,
+        vehicle_cte=cte,
       )
     )
 
@@ -337,7 +342,7 @@ class DrivePilotEnv:
       "throttle": model_throttle,
       "steer": steer,
       "cmd": self._command_id,
-      "dodge_gate": self.dodge_gate(),
+      # dodge_gate 在下面的 tick 循环里逐拍写入（info.update）。
     }
     ticks = max(1, int(cfg.action_repeat))
     elapsed = 0
@@ -399,9 +404,18 @@ class DrivePilotEnv:
       threat_now = threat_pedestrian(
         pos.x, pos.y, heading, self.pedestrians.positions, cfg
       )
+      # 与 dodge_gate() 同一路径投影口径；复用上面算好的 station/cte。
       gate = float(
-        residual_gate_from_ped(
-          pos.x, pos.y, heading, threat_now, cfg, speed_kmh=speed
+        residual_gate_in_corridor(
+          pos.x,
+          pos.y,
+          heading,
+          self.pedestrians.positions,
+          cfg,
+          speed_kmh=speed,
+          path=self.expert.reference_path,
+          station=station,
+          vehicle_cte=cte,
         )
       )
       cte_clip = float(getattr(cfg, "cte_clip_m", 6.0))
