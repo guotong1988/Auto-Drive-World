@@ -302,7 +302,7 @@ def _make_expert(args: argparse.Namespace, map_spec) -> RuleExpert:
 
 def _make_vehicle(render, physics: PhysicsWorld, world: World) -> Vehicle:
   vehicle = Vehicle(render, physics, world.spawn_pos, world.spawn_h)
-  # 与 main / sim_expert 的自动驾驶限速一致，使约 42 km/h 巡航可稳定达到。
+  # 与 main / drive_agent.sim_expert 的自动驾驶限速一致，使约 42 km/h 巡航可稳定达到。
   vehicle.max_speed_kmh = Vehicle.MAX_SPEED_KMH / 3.0
   return vehicle
 
