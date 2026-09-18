@@ -8,15 +8,15 @@ https://space.bilibili.com/447278957/lists
 
 ## 无窗口跑规则驾驶，检查是否会开上草坪
 ```
-~/.pyenv/versions/3.11.13/bin/python3 tools/sim_expert.py          # 全部地图
+~/.pyenv/versions/3.11.13/bin/python3 -m drive_agent.sim_expert          # 全部地图
 ```
 
 ```
-~/.pyenv/versions/3.11.13/bin/python3 tools/sim_expert.py l_bend   # 单张地图并打印轨迹
+~/.pyenv/versions/3.11.13/bin/python3 -m drive_agent.sim_expert l_bend   # 单张地图并打印轨迹
 ```
 
 ```
-~/.pyenv/versions/3.11.13/bin/python3 tools/sim_expert.py train_maps
+~/.pyenv/versions/3.11.13/bin/python3 -m drive_agent.sim_expert train_maps
 ```
 
 ## 规则自动驾驶，切换地图
