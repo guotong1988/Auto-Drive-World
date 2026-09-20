@@ -178,7 +178,7 @@ https://space.bilibili.com/447278957/lists
 ~/.pyenv/versions/3.11.13/bin/python3 -m drive_agent.train_pilot_rl \
   --map all \
   --pilot-checkpoint checkpoints/pilotnet.pt \
-  --total-steps 10000000 \
+  --total-steps 20000000 \
   --rollout-steps 1024 \
   --num-envs 24 \
   --checkpoint checkpoints/pilot_rl.pt
