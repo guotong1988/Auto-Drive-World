@@ -496,7 +496,7 @@ class PilotPPOTrainer:
         metrics[k] /= batches
     return metrics
 
-  def stats(self, window: int = 20) -> dict[str, float]:
+  def stats(self, window: int = 50) -> dict[str, float]:
     rets = self.recent_returns[-window:]
     suc = self.recent_success[-window:]
     hits = self.recent_hits[-window:]

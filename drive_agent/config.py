@@ -94,7 +94,7 @@ class PilotRLConfig:
   num_envs: int = 1
   # success 与 return 都连续 patience 次更新没有新高才停；只看 success 会在还在涨 return 时砍掉。
   # patience 按更新次数算：60 次 × rollout_steps × action_repeat ≈ 18 万环境步
-  # （--total-steps 也是环境步）。滚动 20 局里曲线一抖就会提前砍掉后半段，别再调小。
+  # （--total-steps 也是环境步）。滚动 50 局里曲线一抖就会提前砍掉后半段，别再调小。
   early_stop_patience: int = 60
   early_stop_slack: float = 0.0
   early_stop_return_slack: float = 1.0

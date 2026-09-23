@@ -165,7 +165,7 @@ def main() -> None:
           f"hit {stats['hit_rate']:.2f}  "
           f"to {stats['timeout_rate']:.2f}  "
           f"off {stats['offroad_rate']:.2f}  "
-          f"n {int(min(20, stats['episodes']))}  "
+          f"n {int(min(50, stats['episodes']))}  "
           f"len {stats['ep_len_mean']:.0f}  "
           f"dist {stats['goal_dist_mean']:.0f}  "
           f"spd {stats['speed_mean']:.0f}  "
@@ -179,7 +179,7 @@ def main() -> None:
           f"early {stats['early_rate']:.2f}"
         )
 
-      if stats["episodes"] >= 10:
+      if stats["episodes"] >= 50:
         success_now = float(stats["success_rate"])
         return_now = float(stats["ep_return_mean"])
         success_gain = float(cfg.early_stop_slack)

@@ -10,6 +10,9 @@
 
 默认开窗口（ShowBase，窗口是跟随相机给人看）；落盘/策略一律车头前视。
 ``--headless`` 走离屏缓冲，不弹出 3D 窗口。
+``--headless --workers N`` 多张地图并行采集：每张地图一个子进程，最多 N 个同时跑；
+子进程按地图打标签落盘 ``episode_<map>_XXXX.npz``（单图多 worker 时再按分片加
+``_sK``），互不撞名；全部结束后由父进程统一写 manifest。
 两种模式物理步长都是 ``1/60`` s、默认 ``--stride 2``（约 30 Hz 落盘），
 避免高刷新率屏幕把同一段路采成更多帧。
 旧跟随相机 npz 与当前镜头不一致，须重新采集。
@@ -19,9 +22,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import os
 import random
+import re
 import subprocess
 import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -49,6 +58,45 @@ from drive_env.world import World
 HEADLESS_DT = 1.0 / 60.0
 
 
+def episode_filename(idx: int, tag: str = "") -> str:
+  """``episode_0003.npz``；带标签时 ``episode_<tag>_0003.npz``。"""
+  if tag:
+    return f"episode_{tag}_{idx:04d}.npz"
+  return f"episode_{idx:04d}.npz"
+
+
+def _episode_regex(tag: str = "") -> re.Pattern[str]:
+  if tag:
+    return re.compile(rf"^episode_{re.escape(tag)}_(\d+)\.npz$")
+  return re.compile(r"^episode_(\d+)\.npz$")
+
+
+def write_manifest(output_dir: Path, pilot_config: PilotNetConfig | None = None) -> int:
+  """扫描目录里全部 ``episode_*.npz`` 写 manifest.json，返回 episode 数。"""
+  cfg = pilot_config or PilotNetConfig()
+  output_dir = Path(output_dir)
+  episodes = sorted(p.name for p in output_dir.glob("episode_*.npz"))
+  manifest = {
+    "episodes": episodes,
+    "image_shape": [3, cfg.image_height, cfg.image_width],
+    "labels": ["command", "speed", "steer", "throttle"],
+    "commands": ["straight", "left", "right", "stop"],
+    "camera": "ego",
+    "fov_deg": EGO_FOV_DEG,
+    "note": (
+      "successful goal-reaching episodes; images are windshield-height "
+      "forward ego camera (not chase); steer labels are the expert "
+      "correction (including recovery after injected steer disturbances "
+      "and, if --dodge, rule steer-around-pedestrians); "
+      "throttle labels are the expert speed controller; speed is km/h state"
+    ),
+  }
+  with (output_dir / "manifest.json").open("w") as f:
+    json.dump(manifest, f, indent=2)
+  print(f"manifest written with {len(episodes)} episodes")
+  return len(episodes)
+
+
 class _CollectSession:
   """回合缓冲、DART 扰动与 npz 落盘；窗口 / 无窗口共用。"""
 
@@ -68,6 +116,8 @@ class _CollectSession:
     self._disturb_steer = 0.0
     self._output_dir = Path(args.output)
     self._output_dir.mkdir(parents=True, exist_ok=True)
+    # 并行采集时每个子进程独占一个标签，文件名互不相撞。
+    self._file_tag = str(getattr(args, "file_tag", "") or "")
     self._episode_idx = self._next_episode_index()
     self._success_count = 0
     self._target_success = int(args.episodes)
@@ -76,16 +126,17 @@ class _CollectSession:
     self._grass_seconds = 0.0
     self._max_off_road = 0.0
 
+  def _episode_filename(self, idx: int) -> str:
+    return episode_filename(idx, self._file_tag)
+
   def _next_episode_index(self) -> int:
-    existing = list(self._output_dir.glob("episode_*.npz"))
-    if not existing:
-      return 0
+    """只数本标签下已有的 episode（无标签时只数 ``episode_XXXX.npz``）。"""
+    pattern = _episode_regex(self._file_tag)
     nums: list[int] = []
-    for path in existing:
-      try:
-        nums.append(int(path.stem.split("_")[1]))
-      except (IndexError, ValueError):
-        continue
+    for path in self._output_dir.glob("episode_*.npz"):
+      m = pattern.match(path.name)
+      if m is not None:
+        nums.append(int(m.group(1)))
     return (max(nums) + 1) if nums else 0
 
   def _applied_steer(self, expert_steer: float) -> float:
@@ -231,7 +282,7 @@ class _CollectSession:
       print(f"episode {self._episode_idx:04d} empty — skipped")
       return
 
-    rel = f"episode_{self._episode_idx:04d}.npz"
+    rel = self._episode_filename(self._episode_idx)
     cte = np.asarray(self._ctes, dtype=np.float32)
     np.savez_compressed(
       self._output_dir / rel,
@@ -258,25 +309,10 @@ class _CollectSession:
     )
 
   def _write_manifest(self) -> None:
-    episodes = sorted(p.name for p in self._output_dir.glob("episode_*.npz"))
-    manifest = {
-      "episodes": episodes,
-      "image_shape": [3, self.pilot_config.image_height, self.pilot_config.image_width],
-      "labels": ["command", "speed", "steer", "throttle"],
-      "commands": ["straight", "left", "right", "stop"],
-      "camera": "ego",
-      "fov_deg": EGO_FOV_DEG,
-      "note": (
-        "successful goal-reaching episodes; images are windshield-height "
-        "forward ego camera (not chase); steer labels are the expert "
-        "correction (including recovery after injected steer disturbances "
-        "and, if --dodge, rule steer-around-pedestrians); "
-        "throttle labels are the expert speed controller; speed is km/h state"
-      ),
-    }
-    with (self._output_dir / "manifest.json").open("w") as f:
-      json.dump(manifest, f, indent=2)
-    print(f"manifest written with {len(episodes)} episodes")
+    if bool(getattr(self.args, "skip_manifest", False)):
+      # 并行子进程：manifest 由父进程在全部 worker 结束后统一写，避免并发覆盖。
+      return
+    write_manifest(self._output_dir, self.pilot_config)
 
   def _advance_episode(self, saved: bool = True) -> bool:
     """保存后清缓冲并重置车辆。返回是否还要继续采。"""
@@ -548,6 +584,21 @@ def _log_disturb(args: argparse.Namespace) -> None:
   )
 
 
+def _resolve_map_selection(text: str) -> list[str]:
+  """``l_bend`` / ``train_maps`` / ``l_bend,hook,test_maps`` → 去重后的地图 id 列表。"""
+  ids: list[str] = []
+  for part in str(text).split(","):
+    part = part.strip()
+    if not part:
+      continue
+    for map_id in resolve_maps(part):
+      if map_id not in ids:
+        ids.append(map_id)
+  if not ids:
+    raise KeyError(f"empty map selection: {text!r}")
+  return ids
+
+
 def _run_one_map(args: argparse.Namespace, map_id: str) -> None:
   one = argparse.Namespace(**vars(args))
   one.map = map_id
@@ -558,9 +609,18 @@ def _run_one_map(args: argparse.Namespace, map_id: str) -> None:
     _run_windowed(one)
 
 
-def _collect_child_cmd(args: argparse.Namespace, map_id: str) -> list[str]:
+def _collect_child_cmd(
+  args: argparse.Namespace,
+  map_id: str,
+  *,
+  episodes: int | None = None,
+  seed: int | None = None,
+  file_tag: str | None = None,
+  skip_manifest: bool = False,
+) -> list[str]:
   cmd = [
     sys.executable,
+    "-u",
     "-m",
     "drive_agent.collect",
     "--map",
@@ -568,13 +628,13 @@ def _collect_child_cmd(args: argparse.Namespace, map_id: str) -> list[str]:
     "--output",
     args.output,
     "--episodes",
-    str(args.episodes),
+    str(args.episodes if episodes is None else episodes),
     "--max-seconds",
     str(args.max_seconds),
     "--stride",
     str(args.stride),
     "--seed",
-    str(args.seed),
+    str(args.seed if seed is None else seed),
     "--disturb-prob",
     str(args.disturb_prob),
     "--disturb-amp",
@@ -594,6 +654,10 @@ def _collect_child_cmd(args: argparse.Namespace, map_id: str) -> list[str]:
     cmd.append("--no-disturb")
   if bool(getattr(args, "dodge", False)):
     cmd.append("--dodge")
+  if file_tag:
+    cmd += ["--file-tag", file_tag]
+  if skip_manifest:
+    cmd.append("--skip-manifest")
   return cmd
 
 
@@ -610,14 +674,146 @@ def _run_map_group(args: argparse.Namespace, map_ids: list[str]) -> None:
     subprocess.run(_collect_child_cmd(args, map_id), check=True)
 
 
+# ---------------------------------------------------------------------------
+# 并行采集（仅 --headless）
+# ---------------------------------------------------------------------------
+class _CollectJob:
+  """一个子进程要采的 (地图, 分片)。"""
+
+  def __init__(self, map_id: str, shard: int, n_shards: int, episodes: int, seed: int):
+    self.map_id = map_id
+    self.shard = shard
+    self.n_shards = n_shards
+    self.episodes = episodes
+    self.seed = seed
+    self.tag = map_id if n_shards == 1 else f"{map_id}_s{shard}"
+    self.returncode: int | None = None
+    self.saved = 0
+    self.seconds = 0.0
+    self.log_path: Path | None = None
+
+
+def _plan_jobs(args: argparse.Namespace, map_ids: list[str], workers: int) -> list[_CollectJob]:
+  """worker 比地图多时，把每张图的 episodes 再切成分片，让所有 worker 都有活。"""
+  n_maps = len(map_ids)
+  episodes = int(args.episodes)
+  n_shards = 1
+  if workers > n_maps:
+    n_shards = max(1, min(episodes, math.ceil(workers / n_maps)))
+  jobs: list[_CollectJob] = []
+  for map_id in map_ids:
+    base, rem = divmod(episodes, n_shards)
+    for shard in range(n_shards):
+      n = base + (1 if shard < rem else 0)
+      if n <= 0:
+        continue
+      # 同一张图的不同分片必须换种子，否则路线 / 扰动序列完全重复。
+      seed = int(args.seed) + shard * 1009
+      jobs.append(_CollectJob(map_id, shard, n_shards, n, seed))
+  return jobs
+
+
+def _count_tagged_episodes(output_dir: Path, tag: str) -> int:
+  pattern = _episode_regex(tag)
+  return sum(1 for p in output_dir.glob("episode_*.npz") if pattern.match(p.name))
+
+
+def _run_job(args: argparse.Namespace, job: _CollectJob, print_lock: threading.Lock) -> _CollectJob:
+  output_dir = Path(args.output)
+  log_dir = output_dir / "logs"
+  log_dir.mkdir(parents=True, exist_ok=True)
+  job.log_path = log_dir / f"collect_{job.tag}.log"
+  before = _count_tagged_episodes(output_dir, job.tag)
+  cmd = _collect_child_cmd(
+    args,
+    job.map_id,
+    episodes=job.episodes,
+    seed=job.seed,
+    file_tag=job.tag,
+    skip_manifest=True,
+  )
+  env = dict(os.environ)
+  env["PYTHONUNBUFFERED"] = "1"
+  t0 = time.monotonic()
+  with job.log_path.open("w") as log:
+    log.write(" ".join(cmd) + "\n")
+    proc = subprocess.Popen(
+      cmd,
+      stdout=subprocess.PIPE,
+      stderr=subprocess.STDOUT,
+      text=True,
+      bufsize=1,
+      env=env,
+    )
+    assert proc.stdout is not None
+    prefix = f"[{job.tag}] "
+    for line in proc.stdout:
+      log.write(line)
+      stripped = line.rstrip("\n")
+      if not stripped:
+        continue
+      # 规则专家的规划 / 切点日志很密，并行时只回显采集进度到终端；全文在 log。
+      if args.worker_verbose or not stripped.startswith(("[规划]", "[切点]", "[dodge]")):
+        with print_lock:
+          print(prefix + stripped, flush=True)
+    job.returncode = proc.wait()
+  job.seconds = time.monotonic() - t0
+  job.saved = _count_tagged_episodes(output_dir, job.tag) - before
+  return job
+
+
+def _run_parallel(args: argparse.Namespace, map_ids: list[str], workers: int) -> None:
+  """多张地图 / 多个分片同时用子进程离屏采集，最多 ``workers`` 个并发。"""
+  jobs = _plan_jobs(args, map_ids, workers)
+  workers = max(1, min(workers, len(jobs)))
+  n_shards = jobs[0].n_shards if jobs else 1
+  print(
+    f"parallel collect: {len(jobs)} job(s) on {len(map_ids)} map(s) "
+    f"x {n_shards} shard(s), {workers} worker(s) (headless)"
+  )
+  print(f"maps: {', '.join(map_ids)}")
+  _log_disturb(args)
+  print(f"episode files: episode_<map>[_sK]_XXXX.npz ; worker logs: {Path(args.output) / 'logs'}")
+
+  print_lock = threading.Lock()
+  t0 = time.monotonic()
+  done: list[_CollectJob] = []
+  with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="collect") as pool:
+    futures = [pool.submit(_run_job, args, job, print_lock) for job in jobs]
+    for fut in futures:
+      job = fut.result()
+      done.append(job)
+      status = "ok" if job.returncode == 0 else f"FAILED rc={job.returncode}"
+      with print_lock:
+        print(
+          f"=== done {job.tag}: {status}, {job.saved}/{job.episodes} episodes "
+          f"in {job.seconds:.0f}s (log: {job.log_path})",
+          flush=True,
+        )
+
+  total = write_manifest(Path(args.output))
+  failed = [j for j in done if j.returncode != 0]
+  saved = sum(j.saved for j in done)
+  print(
+    f"parallel collect finished: {saved} new episode(s), {total} total in manifest, "
+    f"{len(failed)} failed job(s), wall {time.monotonic() - t0:.0f}s"
+  )
+  if failed:
+    for job in failed:
+      print(f"  failed: {job.tag} (rc={job.returncode}) see {job.log_path}")
+    raise SystemExit(1)
+
+
 def main() -> None:
   parser = argparse.ArgumentParser(description="Collect driving dataset from simulator")
   parser.add_argument(
     "--map",
     type=str,
     default="train_maps",
-    choices=collect_map_choices(),
-    help="Map id, or train_maps / test_maps / all",
+    help=(
+      "Map id, or train_maps / test_maps / all; comma-separated list also accepted "
+      f"(e.g. l_bend,hook,test_maps). Known: {', '.join(collect_map_choices())}"
+    ),
   )
   parser.add_argument("--output", type=str, default="data/driving")
   parser.add_argument(
@@ -689,15 +885,52 @@ def main() -> None:
     action="store_true",
     help="Offscreen ego-camera capture without opening a 3D window",
   )
+  parser.add_argument(
+    "--workers",
+    type=int,
+    default=1,
+    help=(
+      "Parallel headless collectors (one subprocess per map, at most N at once; "
+      "0 = cpu count). With more workers than maps, each map's episodes are split "
+      "into shards. Requires --headless"
+    ),
+  )
+  parser.add_argument(
+    "--worker-verbose",
+    action="store_true",
+    help="With --workers>1, echo every child line (planner/dodge logs) instead of progress only",
+  )
+  parser.add_argument(
+    "--file-tag",
+    type=str,
+    default="",
+    help="(internal) name episodes episode_<tag>_XXXX.npz so parallel children never collide",
+  )
+  parser.add_argument(
+    "--skip-manifest",
+    action="store_true",
+    help="(internal) do not write manifest.json; the parent process writes it once at the end",
+  )
   args = parser.parse_args()
   if args.no_disturb:
     args.disturb_prob = 0.0
 
+  workers = int(args.workers)
+  if workers <= 0:
+    workers = os.cpu_count() or 1
+  if workers > 1 and not args.headless:
+    parser.error("--workers > 1 requires --headless (windowed ShowBase cannot run in parallel)")
+
   random.seed(args.seed)
   np.random.seed(args.seed)
 
-  map_ids = resolve_maps(args.map)
-  if len(map_ids) == 1:
+  try:
+    map_ids = _resolve_map_selection(args.map)
+  except KeyError as exc:
+    parser.error(str(exc))
+  if workers > 1:
+    _run_parallel(args, map_ids, workers)
+  elif len(map_ids) == 1:
     _run_one_map(args, map_ids[0])
   else:
     _run_map_group(args, map_ids)
