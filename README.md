@@ -20,9 +20,11 @@ https://space.bilibili.com/447278957/lists
 ```
 
 ## 规则自动驾驶，切换地图
-训练地图: crossroads / l_bend / zigzag / t_junction / dual_bend / u_turn
+共 30 张地图（20 训练 + 10 测试），全部为轴对齐路网，规则专家均可到达旗子（`python -m drive_agent.sim_expert all` 可复核）
 
-测试地图: ring / grid / chicane / spur / plaza
+训练地图 (train_maps, 20 张): crossroads / l_bend / zigzag / t_junction / dual_bend / u_turn / l_bend_west / dual_bend_left / hook / serpentine / staircase_west / h_shape / ladder / comb / plus_left / square_loop / offset_junctions / long_straight / spur_west / two_blocks
+
+测试地图 (test_maps, 10 张): ring / grid / chicane / spur / plaza / spiral / pinwheel / maze / l_bend_east / zigzag_west
 
 路上有脚本行人（路口/路段斑马线过街，路边停一下再横穿；偶有未标线路段乱穿）；小地图橙色点；撞到会提示
 ```
@@ -93,6 +95,30 @@ https://space.bilibili.com/447278957/lists
 ~/.pyenv/versions/3.11.13/bin/python3 -m drive_agent.collect --headless --no-disturb --dodge --episodes 5 --map all
 ```
 
+### 无窗口并行采集
+`--workers N`：每张地图一个子进程离屏采集，最多 N 个同时跑（`--workers 0` = CPU 核数）；只支持 `--headless`
+
+文件按地图命名 `episode_<map>_XXXX.npz`，互不撞名；全部结束后由父进程统一写 manifest.json，训练照常 `--data` 指向该目录
+
+worker 比地图多时（如单图 `--workers 4`），每张图的 episodes 再切成分片 `episode_<map>_sK_XXXX.npz`，分片种子不同
+
+终端只回显各 worker 的 map / saved / discarded 进度（前缀 `[map]`），规划、切点、绕行日志在 `<output>/logs/collect_<map>.log`；`--worker-verbose` 全部回显
+
+`--map` 也接受逗号列表：`--map l_bend,hook,test_maps`
+
+同一 `--output` 追加采集时编号自动续接；但 `--seed` 不变会采出同样的路线/扰动，追加请换 `--seed`
+```
+~/.pyenv/versions/3.11.13/bin/python3 -m drive_agent.collect --headless --no-disturb --episodes 3 --map train_maps --workers 8
+```
+
+```
+~/.pyenv/versions/3.11.13/bin/python3 -m drive_agent.collect --headless --dodge --episodes 5 --map all --workers 5
+```
+
+```
+~/.pyenv/versions/3.11.13/bin/python3 -m drive_agent.collect --headless --episodes 8 --map serpentine --workers 4 --seed 7
+```
+
 ## 训练模型
 共享 CNN，按 straight/left/right/stop 分头；(图像, 导航指令, 车速) → 所选头的 (转向, 油门)
 
@@ -102,8 +128,8 @@ https://space.bilibili.com/447278957/lists
 ```
 ~/.pyenv/versions/3.11.13/bin/python3 -m drive_agent.train \
   --data data/driving \
-  --epochs 15 \
-  --batch-size 64 \
+  --epochs 30 \
+  --batch-size 256 \
   --lr 1e-4 \
   --checkpoint checkpoints/pilotnet.pt
 ```
@@ -210,14 +236,14 @@ https://space.bilibili.com/447278957/lists
 ```
 ~/.pyenv/versions/3.11.13/bin/python3 main.py \
   --checkpoint checkpoints/pilot_rl_best.pt \
-  --map crossroads \
+  --map all \
   --headless
 ```
 
 ```
 ~/.pyenv/versions/3.11.13/bin/python3 main.py \
   --checkpoint checkpoints/pilot_rl_best.pt \
-  --map train_maps \
+  --map all \
   --headless \
   --episodes 3
 ```
