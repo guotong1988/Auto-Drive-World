@@ -1,7 +1,7 @@
 # Auto Drive World
 https://space.bilibili.com/447278957/lists
 
-## 采集数据
+# 采集数据
 
 ### 人工驾驶，采集数据
 场景含行人（车头前视画面里会出现）；标签是人开的转向和油门，不要求躲人
@@ -87,7 +87,7 @@ worker 比地图多时（如单图 `--workers 4`），每张图的 episodes 再�
 ~/.pyenv/versions/3.11.13/bin/python3 -m drive_agent.collect --headless --episodes 8 --map serpentine --workers 4 --seed 7
 ```
 
-## 行为克隆 SFT
+# 行为克隆 SFT
 
 共享 CNN，按 straight/left/right/stop 分头；(图像, 导航指令, 车速) → 所选头的 (转向, 油门)
 
@@ -148,7 +148,7 @@ worker 比地图多时（如单图 `--workers 4`），每张图的 episodes 再�
   --map all --checkpoint checkpoints/pilotnet.pt --like-main --episodes 3
 ```
 
-## RL
+# 强化学习
 
 (画面, 导航指令, 速度) → (转向, 油门)
 
@@ -221,7 +221,7 @@ worker 比地图多时（如单图 `--workers 4`），每张图的 episodes 再�
   --episodes 3
 ```
 
-## 其他
+# 其他
 
 ### 规则自动驾驶
 ```
