@@ -1,41 +1,9 @@
 # Auto Drive World
 https://space.bilibili.com/447278957/lists
 
-## 规则自动驾驶
-```
-~/.pyenv/versions/3.11.13/bin/python3 main.py
-```
+## 采集数据
 
-## 无窗口跑规则驾驶，检查是否会开上草坪
-```
-~/.pyenv/versions/3.11.13/bin/python3 -m drive_agent.sim_expert          # 全部地图
-```
-
-```
-~/.pyenv/versions/3.11.13/bin/python3 -m drive_agent.sim_expert l_bend   # 单张地图并打印轨迹
-```
-
-```
-~/.pyenv/versions/3.11.13/bin/python3 -m drive_agent.sim_expert train_maps
-```
-
-## 规则自动驾驶，切换地图
-共 30 张地图（20 训练 + 10 测试），全部为轴对齐路网，规则专家均可到达旗子（`python -m drive_agent.sim_expert all` 可复核）
-
-训练地图 (train_maps, 20 张): crossroads / l_bend / zigzag / t_junction / dual_bend / u_turn / l_bend_west / dual_bend_left / hook / serpentine / staircase_west / h_shape / ladder / comb / plus_left / square_loop / offset_junctions / long_straight / spur_west / two_blocks
-
-测试地图 (test_maps, 10 张): ring / grid / chicane / spur / plaza / spiral / pinwheel / maze / l_bend_east / zigzag_west
-
-路上有脚本行人（路口/路段斑马线过街，路边停一下再横穿；偶有未标线路段乱穿）；小地图橙色点；撞到会提示
-```
-~/.pyenv/versions/3.11.13/bin/python3 main.py --map l_bend
-```
-
-```
-~/.pyenv/versions/3.11.13/bin/python3 main.py --map chicane
-```
-
-## 人工驾驶，采集数据
+### 人工驾驶，采集数据
 场景含行人（车头前视画面里会出现）；标签是人开的转向和油门，不要求躲人
 
 同时写入车速（km/h），给后续 `(图像, 指令, 速度) → (转向, 油门)` 用
@@ -43,7 +11,7 @@ https://space.bilibili.com/447278957/lists
 ~/.pyenv/versions/3.11.13/bin/python3 main.py --collect --map grid
 ```
 
-## 规则自动驾驶，采集数据
+### 规则自动驾驶，采集数据
 同样有行人走动，但规则只沿路到旗子，不躲人、撞了也照常（可用 --dodge 采绕行）
 
 --episodes 为每张地图成功 episode 数；可用单图或 train_maps / test_maps / all
@@ -119,12 +87,15 @@ worker 比地图多时（如单图 `--workers 4`），每张图的 episodes 再�
 ~/.pyenv/versions/3.11.13/bin/python3 -m drive_agent.collect --headless --episodes 8 --map serpentine --workers 4 --seed 7
 ```
 
-## 训练模型
+## 行为克隆 SFT
+
 共享 CNN，按 straight/left/right/stop 分头；(图像, 导航指令, 车速) → 所选头的 (转向, 油门)
 
 行人只出现在画面里；旧分头最后一层的行人列加载时丢掉
 
 旧跟随相机数据 / 旧单头拼接 checkpoint 都不能用，请按新镜头重新采集再训练
+
+### 训练
 ```
 ~/.pyenv/versions/3.11.13/bin/python3 -m drive_agent.train \
   --data data/driving \
@@ -134,7 +105,7 @@ worker 比地图多时（如单图 `--workers 4`），每张图的 episodes 再�
   --checkpoint checkpoints/pilotnet.pt
 ```
 
-## 加载模型
+### 加载模型
 之后按 T 开启自动驾驶（导航指令仍由规则规划器提供，转向和油门由模型预测）
 
 油门由模型直接执行，不再因前方行人强制降速；泛化评测请换测试地图
@@ -142,7 +113,7 @@ worker 比地图多时（如单图 `--workers 4`），每张图的 episodes 再�
 ~/.pyenv/versions/3.11.13/bin/python3 main.py --checkpoint checkpoints/pilotnet.pt --map crossroads
 ```
 
-## 闭环评测
+### 闭环评测
 （与 PPO 同一套环境：随机路线、行人、撞人终止；压草只扣分不结束；确定性、不加探索噪声）
 
 先看 BC 基线能不能到终点；--steer expert 是规则转向+油门对照；--no-peds 只测跟路
@@ -177,7 +148,8 @@ worker 比地图多时（如单图 `--workers 4`），每张图的 episodes 再�
   --map all --checkpoint checkpoints/pilotnet.pt --like-main --episodes 3
 ```
 
-## PPO 微调 PilotNet
+## RL
+
 (画面, 导航指令, 速度) → (转向, 油门)
 
 导航指令仍是规则的 straight/left/right；行人只出现在画面里，不另做特征向量
@@ -186,6 +158,7 @@ worker 比地图多时（如单图 `--workers 4`），每张图的 episodes 再�
 
 绕开行人/到旗子有正奖励；压草只扣分不结束，撞人仍结束 rollout
 
+### PPO 微调 PilotNet
 无窗口离屏渲染
 ```
 ~/.pyenv/versions/3.11.13/bin/python3 -m drive_agent.train_pilot_rl \
@@ -196,7 +169,7 @@ worker 比地图多时（如单图 `--workers 4`），每张图的 episodes 再�
   --checkpoint checkpoints/pilot_rl.pt
 ```
 
-### 并行采集和RL训练
+### 并行采集和 RL 训练
 多进程仿真 + 主进程批量推理，提高 GPU 利用率（--window 时不能并行）
 
 每个环境采 --rollout-steps 步，一次更新样本量 = num_envs × rollout_steps；总步数仍按环境交互累计
@@ -224,7 +197,7 @@ worker 比地图多时（如单图 `--workers 4`），每张图的 episodes 再�
   --window
 ```
 
-## Pilot-RL 自动驾驶
+### Pilot-RL 自动驾驶
 （按 T；转向和油门由微调网络，导航指令仍是规则）
 ```
 ~/.pyenv/versions/3.11.13/bin/python3 main.py \
@@ -246,4 +219,40 @@ worker 比地图多时（如单图 `--workers 4`），每张图的 episodes 再�
   --map all \
   --headless \
   --episodes 3
+```
+
+## 其他
+
+### 规则自动驾驶
+```
+~/.pyenv/versions/3.11.13/bin/python3 main.py
+```
+
+### 无窗口跑规则驾驶，检查是否会开上草坪
+```
+~/.pyenv/versions/3.11.13/bin/python3 -m drive_agent.sim_expert          # 全部地图
+```
+
+```
+~/.pyenv/versions/3.11.13/bin/python3 -m drive_agent.sim_expert l_bend   # 单张地图并打印轨迹
+```
+
+```
+~/.pyenv/versions/3.11.13/bin/python3 -m drive_agent.sim_expert train_maps
+```
+
+### 规则自动驾驶，切换地图
+共 30 张地图（20 训练 + 10 测试），全部为轴对齐路网，规则专家均可到达旗子（`python -m drive_agent.sim_expert all` 可复核）
+
+训练地图 (train_maps, 20 张): crossroads / l_bend / zigzag / t_junction / dual_bend / u_turn / l_bend_west / dual_bend_left / hook / serpentine / staircase_west / h_shape / ladder / comb / plus_left / square_loop / offset_junctions / long_straight / spur_west / two_blocks
+
+测试地图 (test_maps, 10 张): ring / grid / chicane / spur / plaza / spiral / pinwheel / maze / l_bend_east / zigzag_west
+
+路上有脚本行人（路口/路段斑马线过街，路边停一下再横穿；偶有未标线路段乱穿）；小地图橙色点；撞到会提示
+```
+~/.pyenv/versions/3.11.13/bin/python3 main.py --map l_bend
+```
+
+```
+~/.pyenv/versions/3.11.13/bin/python3 main.py --map chicane
 ```
