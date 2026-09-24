@@ -6,7 +6,7 @@ https://space.bilibili.com/447278957/lists
 ### 人工驾驶，采集数据
 场景含行人（车头前视画面里会出现）；标签是人开的转向和油门，不要求躲人
 
-同时写入车速（km/h），给后续 `(图像, 指令, 速度) → (转向, 油门)` 用
+同时写入车速（km/h），给后续 `(单帧图像, 指令, 速度) → (转向, 油门)` 用
 ```
 ~/.pyenv/versions/3.11.13/bin/python3 main.py --collect --map grid
 ```
@@ -89,7 +89,7 @@ worker 比地图多时（如单图 `--workers 4`），每张图的 episodes 再�
 
 # 行为克隆 SFT
 
-共享 CNN，按 straight/left/right/stop 分头；(图像, 导航指令, 车速) → 所选头的 (转向, 油门)
+共享 CNN，按 straight/left/right/stop 分头；(单帧图像, 导航指令, 车速) → 所选头的 (转向, 油门)
 
 行人只出现在画面里；旧分头最后一层的行人列加载时丢掉
 
@@ -150,7 +150,7 @@ worker 比地图多时（如单图 `--workers 4`），每张图的 episodes 再�
 
 # 强化学习
 
-(画面, 导航指令, 速度) → (转向, 油门)
+(单帧图像, 导航指令, 速度) → (转向, 油门)
 
 导航指令仍是规则的 straight/left/right；行人只出现在画面里，不另做特征向量
 
